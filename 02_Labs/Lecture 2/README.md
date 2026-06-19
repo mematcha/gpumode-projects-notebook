@@ -1,6 +1,6 @@
-# **Experiment brief**
+# **Experiment brief - Experiment 1**
 
-This lab benchmarks element-wise vector addition `c[i] = a[i] + b[i]`) across vector sizes from 1K to 100M, comparing three implementations: a plain C++ CPU loop, a hand-written CUDA kernel with explicit host↔device copies, and PyTorch on GPU. The CPU run times only the add loop; the CUDA run splits timing into host-to-device copy, kernel execution, and device-to-host copy; PyTorch times the add on tensors already allocated on the GPU (no PCIe transfers in that number). Running `./run_experiments.sh` compiles the C++/CUDA binaries, sweeps all sizes, and writes `experiment_results.csv`. The goal is to see when the GPU actually wins: at small sizes fixed launch and transfer overhead dominate, but at large sizes the kernel alone can be much faster than CPU—while end-to-end CUDA still loses if you pay full PCIe round-trips every run.
+This lab benchmarks element-wise vector addition `c[i] = a[i] + b[i]`) across vector sizes from 1K to 100M, comparing three implementations: a plain C++CPU loop, a hand-written CUDA kernel with explicit host↔device copies, and PyTorch on GPU. The CPU run times only the add loop; the CUDA run splits timing into host-to-device copy, kernel execution, and device-to-host copy; PyTorch times the add on tensors already allocated on the GPU (no PCIe transfers in that number). Running `./run_experiments.sh` compiles the C++/CUDA binaries, sweeps all sizes, and writes `experiment_results.csv`. The goal is to see when the GPU actually wins: at small sizes fixed launch and transfer overhead dominate, but at large sizes the kernel alone can be much faster than CPU—while end-to-end CUDA still loses if you pay full PCIe round-trips every run.
 
 # How to run the experiment
 
@@ -130,31 +130,24 @@ The core GPUMODE lesson: **profile the full pipeline** (H2D → kernel → D2H),
 **Small N (1K–100K)**
 
 - CPU wins: **0.000–0.032 ms** vs kernel **~0.24–0.29 ms**
-
 - GPU kernel time barely changes with size → **launch overhead**, not real compute
-
 - CPU at 1K shows **0.000** (sub-ms, rounded)
 
 **Medium N (1M)**
 
 - CPU **0.99 ms** vs CUDA kernel **0.32 ms** → GPU ~**3×** faster (compute only)
-
 - Still not a big win; fixed GPU cost still matters
 
 **Large N (10M–100M)**
 
 - CPU scales linearly: **10 ms → 98 ms**
-
 - Kernel scales slowly: **0.71 ms → 5.2 ms**
-
 - At **100M**: CPU **98.5 ms** vs kernel **5.2 ms** → ~**19×** GPU speedup
 
 **Takeaway**
 
 - **Small data:** CPU is faster (or tied) — GPU overhead dominates
-
 - **Large data:** GPU kernel pulls ahead sharply once work amortizes launch cost
-
 - Compare **CPU_Total** vs **CUDA_Kernel** for fair compute-only; **CUDA_Total** includes copies and is much slower end-to-end
 
 ---
@@ -167,5 +160,77 @@ The core GPUMODE lesson: **profile the full pipeline** (H2D → kernel → D2H),
 
 ---
 
+# Experiment Brief - Experiment 2
 
+Experiment 2 fixes the same vector-add CUDA kernel as Experiment 1 but sweeps **block size** (32, 64, 128, 256, 512, 1024 threads per block) across vector sizes from 1K to 100M, using `vector_add_var_block_cuda.cu` and `./run_experiments.sh` (or the second half of that script). For each `(N, block_size)` pair it records blocks per grid and the usual timings: H2D copy, kernel execution, D2H copy, and total end-to-end time, writing results to `block_observations.csv`. The goal is to see how launch configuration affects **kernel time** once N is large enough — while PCIe copy times stay roughly flat for a given N — and whether any block size gets meaningfully closer to the GPU’s memory-bandwidth limit. At small N, kernel time is mostly fixed overhead and block size barely matters; at 100M elements, kernel time drops from ~9.8 ms (block 32) to ~4.7 ms (64–1024), after which block size has little effect because the workload is memory-bound, not compute-bound.
+
+# How to run the experiment
+
+Just run `./run_experiments.sh` on a GPU Runtime. You will see a CSV Generated of the experiment results.
+
+# Observations
+
+### Copies (H2D / D2H) — block size doesn’t matter much
+
+- For a fixed vector size, **copy times are nearly the same** across all block sizes.
+- Copies depend on **how many bytes** you move, not how you launch the kernel.
+- At **100M**: H2D ~**172 ms**, D2H ~**85–88 ms** regardless of block size.
+- **Total time is still transfer-dominated** at large N (~260–270 ms total vs ~5 ms kernel).
+
+---
+
+### Small vectors (1K–100K) — block size barely helps
+
+- Kernel time stays around **~0.10–0.20 ms** for all block sizes.
+- Too little work → **launch overhead** dominates, not memory bandwidth.
+- Differences between block 32 and 1024 are mostly noise.
+
+---
+
+### Medium vectors (1M) — still flat
+
+- Kernel ~**0.15–0.16 ms** for every block size.
+- End-to-end ~~**3.1 ms** — still mostly **PCIe copies** (~~3 ms transfer vs ~0.15 ms kernel).
+
+---
+
+### Large vectors (10M+) — block size starts to matter
+
+- **Block 32 is slowest** on kernel time:
+  - 10M: **0.68 ms** (block 32) vs **~0.57–0.64 ms** (others)
+  - 100M: **9.77 ms** (block 32) vs **~4.7–4.8 ms** (64–1024)
+- **~2× kernel speedup** at 100M just by moving from block 32 → 64+.
+
+---
+
+### Very large N (100M) — block size plateaus after 64
+
+- Best kernel times cluster around **~4.7–4.8 ms** for blocks **64, 128, 256, 512, 1024**.
+- Going from 64 → 1024 **doesn’t help much** — you’re **memory-bound**, not launch-bound.
+- Too many tiny blocks (32 → 3.1M blocks) adds scheduling overhead.
+
+---
+
+### Rule of thumb from your data
+
+| Vector size | Block size effect |
+
+|-------------|-------------------|
+
+| **≤ 100K** | Ignore — overhead dominates |
+
+| **1M** | Ignore — copies dominate total |
+
+| **10M** | Small effect (~15–20% kernel spread) |
+
+| **100M** | Big effect at 32; **64+ is fine** |
+
+---
+
+### Bottom line
+
+- **Tuning block size only matters when N is large enough** that the kernel does real work.
+- **Block 32 is a bad choice at 100M** for this naive kernel.
+- **Block 64–256 is a sweet spot** in your results — good occupancy without millions of blocks.
+- Even with a tuned block size, **PCIe transfers still dominate end-to-end time** for a one-shot vector add.
 
