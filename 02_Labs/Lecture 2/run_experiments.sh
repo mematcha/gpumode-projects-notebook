@@ -1,5 +1,9 @@
 #!/bin/bash
 set -e
+
+echo "Conducting Experiment 1: To compare different Execution methods for vector addition"
+echo "----------------------------------------"
+
 # Define vector sizes
 VECTOR_SIZES=(1000 10000 100000 1000000 10000000 100000000) # 10^3 to 10^8
 
@@ -50,3 +54,44 @@ done
 
 echo "Experiments finished. Results saved to $OUTPUT_FILE"
 echo "You can view the results by running: cat $OUTPUT_FILE"
+
+echo "----------------------------------------"
+
+echo "Conducting Experiment 2: To compare CUDA Kernel over different block sizes"
+echo "----------------------------------------"
+
+BLOCK_SIZES=(32 64 128 256 512 1024)
+
+BLOCK_OBS_FILE="block_observations.csv"
+
+nvcc vector_add_var_block_cuda.cu -o vector_add_var_block_cuda -std=c++11 -O3 -Xcompiler -Wall
+
+echo "Running experiments..."
+
+echo "Vector_Size,Block_Size,Blocks_Per_Grid,CUDA_Copy_H2D_ms,CUDA_Kernel_ms,CUDA_Copy_D2H_ms,CUDA_Total_ms" > "$BLOCK_OBS_FILE"
+
+for n in "${VECTOR_SIZES[@]}"; do
+    echo "--- Vector Size: $n ---"
+
+    for block_size in "${BLOCK_SIZES[@]}"; do
+        echo "  Running block size: $block_size"
+
+        output=$(./vector_add_var_block_cuda "$n" "$block_size")
+
+        blocks_per_grid=$(echo "$output" | grep "blocksPerGrid:" | awk '{print $NF}')
+
+        h2d_ms=$(echo "$output" | grep "Host-to-Device Copy Time:" | awk '{print $(NF-1)}')
+        kernel_ms=$(echo "$output" | grep "Kernel Execution Time:" | awk '{print $(NF-1)}')
+        d2h_ms=$(echo "$output" | grep "Device-to-Host Copy Time:" | awk '{print $(NF-1)}')
+        total_ms=$(echo "$output" | grep "Total End-to-End Time:" | awk '{print $(NF-1)}')
+
+        echo "    Blocks/Grid: $blocks_per_grid"
+        echo "    Kernel:      ${kernel_ms} ms"
+        echo "    Total:       ${total_ms} ms"
+
+        echo "$n,$block_size,$blocks_per_grid,$h2d_ms,$kernel_ms,$d2h_ms,$total_ms" >> "$BLOCK_OBS_FILE"
+    done
+done
+
+echo "Experiment 2 finished. Results saved to $BLOCK_OBS_FILE"
+echo "You can view the results by running: cat $BLOCK_OBS_FILE"
