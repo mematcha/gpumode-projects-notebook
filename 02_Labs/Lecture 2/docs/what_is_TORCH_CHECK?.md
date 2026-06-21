@@ -1,0 +1,3 @@
+`TORCH_CHECK` is a PyTorch C++ macro that validates a condition before your extension continues. If the check passes, execution moves on; if it fails, PyTorch raises a Python `RuntimeError` with the message you provide.
+
+Extension authors use it at the Python/C++ boundary to reject bad inputs—wrong device, dtype, shape, or memory layout—before calling `data_ptr()` or launching a CUDA kernel, so failures show up as clear errors instead of crashes or silent wrong results.
