@@ -84,89 +84,61 @@ __global__ void shared_mean_filter_kernel(
     int radius
 ){
 
-    //Step 1: get local thread index
-    int local_row = threadIdx.y;
-    int local_col = threadIdx.x;
-    int block_start_row = blockIdx.y * blockDim.y;
-    int block_start_col = blockIdx.x * blockDim.x;
-    int local_tid = local_row * blockDim.x + local_col;
-    //Step 2: plan for the shared memory
-    // we will use the shared memory to store the surrounding pixels of the output pixel
+    // Step 1: get the block start row and col for the output pixel
+    // And then from the extract the local thread index for the output pixel
+    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    int local_tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    // Step 2: plan for the shared memory
     extern __shared__ uint8_t shared_mem[];
-    int shared_mem_size = (blockDim.x+2*radius) * (blockDim.y+2*radius); // e.g. 18*18 for a 16*16 block and radius 1. 
-    // loop over to fill the shared memory from the input image
-    for (int idx = local_tid; idx<shared_mem_size; idx += blockDim.x * blockDim.y){
-        // get the shared row and col from the local thread index
-        int shared_row = idx / (blockDim.x+2*radius);
-        int shared_col = idx % (blockDim.x+2*radius);
-        int shared_index = shared_row * (blockDim.x+2*radius) + shared_col;
+    int shared_mem_dims = (blockDim.x + 2*radius) * (blockDim.y + 2*radius);
+    
 
-        // get global row and col from the shared row and col
-        int global_row = block_start_row + shared_row - radius;
-        int global_col = block_start_col + shared_col - radius;
-
+    // Step 3: fill the shared memory from the input
+    for (int idx = local_tid; idx < shared_mem_dims; idx += blockDim.x * blockDim.y){
+        int shared_row = idx / (blockDim.x + 2*radius);
+        int shared_col = idx % (blockDim.x + 2*radius);
+        int shared_index = shared_row * (blockDim.x + 2*radius) + shared_col;
+        
+        int global_row = blockIdx.y * blockDim.y + shared_row - radius;
+        int global_col = blockIdx.x * blockDim.x + shared_col - radius;
         if (global_row >= 0 && global_row < height && global_col >= 0 && global_col < width){
-            int image_index = global_row * width + global_col;
-            shared_mem[shared_index] = image_ptr[image_index];
+            int global_index = global_row * width + global_col;
+            shared_mem[shared_index] = image_ptr[global_index];
         }
         else{
             shared_mem[shared_index] = 0;
         }
-        
     }
 
     __syncthreads();//ensure that all the threads have finished writing to the shared memory before continuing
-    
-    // Step 3: compute the mean of the surrounding pixels
 
-    int sum = 0;
-    int count = 0;
-
-    // Global coordinates of this thread's output pixel
-    int out_row = block_start_row + local_row;
-    int out_col = block_start_col + local_col;
-
-    // Only valid output threads should compute/write
-    if (out_row < height && out_col < width) {
-
-        for (int i = -radius; i <= radius; i++) {
-            for (int j = -radius; j <= radius; j++) {
-
-                // Corresponding global neighbor coordinates
-                int global_neighbor_row = out_row + i;
-                int global_neighbor_col = out_col + j;
-
-                // Match naive-kernel behavior:
-                // only include valid neighbors
-                if (global_neighbor_row >= 0 &&
-                    global_neighbor_row < height &&
-                    global_neighbor_col >= 0 &&
-                    global_neighbor_col < width) {
-
-                    // Location of that neighbor inside shared memory
-                    int shared_row = local_row + radius + i;
-                    int shared_col = local_col + radius + j;
-
-                    int shared_index =
-                        shared_row * (blockDim.x + 2 * radius)
-                        + shared_col;
-
+    // Step 4: compute the mean of the surrounding pixels
+    if (out_row < height && out_col < width){
+        int sum = 0;
+        int count = 0;
+        for (int i = -radius; i <= radius; i++){
+            for (int j = -radius; j <= radius; j++){
+                // but we need the global row and col to be within bounds so that we can access the shared memory
+                int global_row = out_row + i ;
+                int global_col = out_col + j ;
+                if (global_row >= 0 && global_row < height && global_col >= 0 && global_col < width){
+                    int shared_index = (threadIdx.y + radius + i) * (blockDim.x + 2*radius) + (threadIdx.x + radius + j);
                     sum += shared_mem[shared_index];
                     count++;
                 }
+                
             }
         }
-
-        int out_tid = out_row * width + out_col;
-
-        if (count > 0) {
-            output_ptr[out_tid] = static_cast<uint8_t>(sum / count);
-        } else {
+        int out_tid = (blockIdx.y * blockDim.y + threadIdx.y) * width + (blockIdx.x * blockDim.x + threadIdx.x);
+        if (count > 0){
+            output_ptr[out_tid] = sum / count;
+        }
+        else{
             output_ptr[out_tid] = 0;
         }
     }
-    
-    
     
 }    
 
@@ -213,7 +185,7 @@ torch::Tensor naive_mean_filter(torch::Tensor image, int radius){
     TORCH_CHECK(image.dim() == 2, "Image must be a 2D tensor");
     TORCH_CHECK(radius > 0, "Radius must be a positive integer");
     TORCH_CHECK(image.device().is_cuda(), "Image must be on the GPU");
-    TORCH_CHECK(image.dtype() == torch::kFloat32, "Image must be a FP32 tensor");
+    TORCH_CHECK(image.dtype() == torch::kUInt8, "Image must be a uint8 tensor");
     // 2. Parameters to be Passed to the Kernel
     torch::Tensor output = torch::empty_like(image, image.options()); //ensure that the output tensor is on the same device as the image
     const uint8_t* image_ptr = image.data_ptr<uint8_t>();
@@ -225,9 +197,7 @@ torch::Tensor naive_mean_filter(torch::Tensor image, int radius){
     dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
     // 4. Launch the Kernels
     naive_mean_filter_kernel<<<grid, block>>>(image_ptr, output_ptr, width, height, radius);
-    // 5. Synchronize the Device
-    cudaDeviceSynchronize();
-    // 6. Return the Result
+    // 5. Return the Result
     return output;
 }
 
@@ -237,7 +207,7 @@ torch::Tensor shared_mean_filter(torch::Tensor image, int radius){
     TORCH_CHECK(image.dim() == 2, "Image must be a 2D tensor");
     TORCH_CHECK(radius > 0, "Radius must be a positive integer");
     TORCH_CHECK(image.device().is_cuda(), "Image must be on the GPU");
-    TORCH_CHECK(image.dtype() == torch::kFloat32, "Image must be a FP32 tensor");
+    TORCH_CHECK(image.dtype() == torch::kUInt8, "Image must be a uint8 tensor");
     // 2. Parameters to be Passed to the Kernel
     torch::Tensor output = torch::empty_like(image, image.options()); //ensure that the output tensor is on the same device as the image
     const uint8_t* image_ptr = image.data_ptr<uint8_t>();
@@ -250,8 +220,6 @@ torch::Tensor shared_mean_filter(torch::Tensor image, int radius){
     size_t shared_mem_size = (block.x+2*radius) * (block.y+2*radius) * sizeof(uint8_t);
     // 4. Launch the Kernels
     shared_mean_filter_kernel<<<grid, block, shared_mem_size>>>(image_ptr, output_ptr, width, height, radius);
-    // 5. Synchronize the Device
-    cudaDeviceSynchronize();
-    // 6. Return the Result
+    // 5. Return the Result
     return output;
 }
