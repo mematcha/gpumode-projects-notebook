@@ -1,0 +1,5 @@
+- FlashAttentiion ArXiv: https://arxiv.org/abs/2205.14135 
+- FlashAttention Github: https://github.com/Dao-AILab/flash-attention
+- Bits and Bytes Github Repo: https://github.com/bitsandbytes-foundation/bitsandbytes
+- GPTQ ArXiv: https://arxiv.org/abs/2210.17323
+- AWQ ArXiv: https://arxiv.org/abs/2306.00978
